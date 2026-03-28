@@ -1,16 +1,17 @@
 from pathlib import Path
 
-from PyQt6.QtCore import QUrl, QSettings, Qt
+from PyQt6.QtCore import QTimer, QUrl, QSettings, Qt
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
-    QMainWindow,
     QApplication,
-    QToolBar,
     QLineEdit,
+    QMainWindow,
+    QMessageBox,
     QPushButton,
     QTabWidget,
+    QToolBar,
 )
-from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 import sys
 
@@ -84,6 +85,18 @@ class Browser(QMainWindow):
         cache_dir.mkdir(parents=True, exist_ok=True)
         self.profile.setCachePath(str(cache_dir))
 
+    def _configure_page_rendering(self, page: QWebEnginePage):
+        attr_enum = QWebEngineSettings.WebAttribute
+        attrs = (
+            attr_enum.WebGLEnabled,
+            attr_enum.Accelerated2dCanvasEnabled,
+            attr_enum.FocusOnNavigationEnabled,
+            attr_enum.SpatialNavigationEnabled,
+        )
+        settings = page.settings()
+        for attr in attrs:
+            settings.setAttribute(attr, False)
+
     def _current_view(self):
         widget = self.tab_widget.currentWidget()
         return widget if isinstance(widget, QWebEngineView) else None
@@ -97,10 +110,14 @@ class Browser(QMainWindow):
         view = QWebEngineView(self)
         page = QWebEnginePage(self.profile, view)
         view.setPage(page)
+        self._configure_page_rendering(page)
         view.setUrl(QUrl(start_url))
         view.page().iconChanged.connect(lambda icon, view=view: self._update_tab_icon(view, icon))
         view.urlChanged.connect(lambda url, view=view: self._on_view_url_changed(view, url))
         view.titleChanged.connect(lambda title, view=view: self._update_tab_title(view, title))
+        page.featurePermissionRequested.connect(
+            lambda origin, feature, page=page: self._handle_feature_permission(page, origin, feature)
+        )
         index = self.tab_widget.addTab(view, "New Tab")
         self.tab_widget.setCurrentIndex(index)
 
@@ -127,6 +144,41 @@ class Browser(QMainWindow):
         index = self.tab_widget.indexOf(view)
         if index != -1:
             self.tab_widget.setTabText(index, title or "New Tab")
+
+    def _handle_feature_permission(self, page, origin: QUrl, feature):
+        description = self._feature_description(feature)
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Permission Request")
+        dialog.setText(f"{origin.host() or origin.toString()} wants to use {description}.")
+        dialog.setInformativeText("Allow this request for this session? It will be asked again next time.")
+        dialog.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        dialog.setDefaultButton(QMessageBox.StandardButton.No)
+        dialog.setIcon(QMessageBox.Icon.Question)
+        result = dialog.exec()
+        policy = QWebEnginePage.PermissionPolicy
+        if result == QMessageBox.StandardButton.Yes:
+            page.setFeaturePermission(origin, feature, policy.PermissionGrantedByUser)
+            QTimer.singleShot(
+                200,
+                lambda: page.setFeaturePermission(
+                    origin, feature, policy.PermissionDeniedByUser
+                ),
+            )
+        else:
+            page.setFeaturePermission(origin, feature, policy.PermissionDeniedByUser)
+
+    def _feature_description(self, feature):
+        names = {
+            QWebEnginePage.Feature.MediaAudioCapture: "microphone",
+            QWebEnginePage.Feature.MediaVideoCapture: "camera",
+            QWebEnginePage.Feature.MediaAudioVideoCapture: "camera and microphone",
+            QWebEnginePage.Feature.Geolocation: "location",
+            QWebEnginePage.Feature.DesktopVideoCapture: "screen sharing",
+            QWebEnginePage.Feature.Notifications: "notifications",
+            QWebEnginePage.Feature.MouseLock: "mouse locking",
+        }
+        fallback = getattr(feature, "value", feature)
+        return names.get(feature, f"feature #{fallback}")
 
     def _close_tab(self, index):
         view = self.tab_widget.widget(index)
